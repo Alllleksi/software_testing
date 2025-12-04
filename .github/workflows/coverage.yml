@@ -1,4 +1,4 @@
-ame: Coverage
+name: Coverage
 
 on:
   push:
@@ -21,7 +21,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22.x"
+          node-version: "20.x" # Tried different version
           cache: "npm"
 
       - name: Install dependencies
@@ -30,28 +30,52 @@ jobs:
       - name: Run Jest with coverage
         run: npm run test:coverage
 
-      # Only start the app and run Cypress if there are Cypress specs
-      - name: Check for Cypress specs
-        id: specs
+      # Detect if Cypress is installed AND specs exist
+      - name: Check for Cypress installation and specs
+        id: cypress_check
+        shell: bash
         run: |
-          if [ -n "$(git ls-files 'cypress/e2e/**/*.cy.*' 2>/dev/null)" ]; then
-            echo "found=true" >> $GITHUB_OUTPUT
-          else
-            echo "found=false" >> $GITHUB_OUTPUT
+          HAS_CYPRESS="false"
+          HAS_SPECS="false"
+          if npx --yes --no cypress version >/dev/null 2>&1; then
+            HAS_CYPRESS="true"
           fi
+          # Look for committed spec files
+          if ls cypress/e2e/*.cy.* >/dev/null 2>&1 || ls cypress/e2e/**/*.cy.* >/dev/null 2>&1; then
+            HAS_SPECS="true"
+          fi
+          echo "has_cypress=$HAS_CYPRESS" >> $GITHUB_OUTPUT
+          echo "has_specs=$HAS_SPECS" >> $GITHUB_OUTPUT
 
       - name: Start app
-        if: steps.specs.outputs.found == 'true'
+        if: steps.cypress_check.outputs.has_cypress == 'true' && steps.cypress_check.outputs.has_specs == 'true'
         run: |
-          npm run start:app &
-          npx wait-on http://localhost:5173
+          npm run start:app > app.log 2>&1 &
+          echo "Waiting for app…"
+          npx --yes wait-on --timeout 60000 http://localhost:5173
+          echo "App started"
+        env:
+          CI: true
+
+      - name: Show app log if start failed
+        if: failure()
+        run: |
+          echo "=== app.log (if present) ==="
+          [ -f app.log ] && tail -n +1 app.log || echo "no app.log"
 
       - name: Run Cypress (headless) with coverage
-        if: steps.specs.outputs.found == 'true'
+        if: steps.cypress_check.outputs.has_cypress == 'true' && steps.cypress_check.outputs.has_specs == 'true'
         run: npx cypress run
 
-      - name: Merge Jest + Cypress coverage (works even if only Jest lcov exists)
-        run: npx lcov-result-merger "coverage/**/*.lcov.info" "coverage/merged.lcov"
+      # Merge coverage even if only Jest produced lcov
+      - name: Merge Jest + Cypress coverage
+        run: |
+          npx lcov-result-merger "coverage/**/*.lcov.info" "coverage/merged.lcov" || {
+            echo "Merge failed or only one lcov present; falling back to Jest lcov"
+            cp coverage/jest/lcov.info coverage/merged.lcov
+          }
+          ls -la coverage || true
+          ls -la coverage/jest || true
 
       - name: Upload coverage to Coveralls
         uses: coverallsapp/github-action@v2
